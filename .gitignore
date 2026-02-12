@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Backup files
+*.backup
+*~
+
+# Generated files
+webremote.plugin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
