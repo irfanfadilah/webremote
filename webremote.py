@@ -72,7 +72,8 @@ class ClientSession(object):
 			'next': self.plugin.client_next,
 			'previous': self.plugin.client_previous,
 			'playpause': self.plugin.client_playpause,
-			'seek': self.plugin.client_seek
+			'seek': self.plugin.client_seek,
+			'volume': self.plugin.client_volume
 		}
 
 	def message_cb(self, conn, msgtype, message):
@@ -205,6 +206,7 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 		GObject.Object.__init__(self)
 		self.settings = Gio.Settings.new("org.gnome.rhythmbox.plugins.webremote")
 		self.settings.connect("changed", self.settings_changed_cb)
+		self.player_settings = Gio.Settings.new("org.gnome.rhythmbox.player")
 		self.server = None
 		self.next_connid = 0
 		self.connections = {}
@@ -327,6 +329,10 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 			m = { 'playing': False, 'id': 0 }
 
 		m['hostname'] = GLib.get_host_name()
+		
+		# Add volume state
+		m['volume'] = self.shell_player.get_volume()[1]
+		
 		return m
 
 	def client_next(self, message):
@@ -356,6 +362,19 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 			return {'result': 'ok'}
 		except Exception as e:
 			return {'result': str(e) }
+
+	def client_volume(self, message):
+		try:
+			if 'volume' in message:
+				# Set volume (0.0 to 1.0)
+				volume = float(message['volume'])
+				volume = max(0.0, min(1.0, volume))
+				self.shell_player.set_volume(volume)
+			# Always return current volume
+			current_volume = self.shell_player.get_volume()[1]
+			return {'result': 'ok', 'volume': current_volume}
+		except Exception as e:
+			return {'result': str(e)}
 
 
 	def playing_song_changed_cb(self, player, entry):
