@@ -1,82 +1,107 @@
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <link rel="stylesheet" href="/css/pure-min.css" />
-  <link rel="stylesheet" href="/css/grids-responsive-min.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rhythmbox Remote</title>
+  <link rel="stylesheet" href="/css/bulma.min.css" />
   <link rel="stylesheet" href="/css/webremote.css" />
   <script type="text/javascript" src="/js/webremote.js"></script>
 </head>
 <body>
-<div class="pure-g webremote">
-	<div class="wrapper">
+  <div class="container">
+    <div class="player-wrapper">
+      
+      <!-- Connection Form -->
+      <div id="connectform" class="connect-section">
+        <div class="card">
+          <div class="card-content has-text-centered">
+            <h1 class="title is-4 has-text-white mb-5">Rhythmbox Remote</h1>
+            <form id="connect-form">
+              <div class="field has-addons has-addons-centered">
+                <div class="control is-expanded">
+                  <input 
+                    type="password" 
+                    id="accesskey" 
+                    class="input is-large" 
+                    placeholder="Passphrase"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="control">
+                  <button type="submit" class="button is-primary is-large" id="connectbutton">
+                    <span class="icon">
+                      <img src="/icon/go-next-symbolic/24" alt="Connect">
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
 
-		<div class="pure-u-1-1">
-			<div id="trackimage">
-				<img class="noalbumart" src="/icon/org.gnome.Rhythmbox3-symbolic/128">
-			</div>
-		</div>
+      <!-- Main Player Interface -->
+      <div id="player-interface" class="player-interface" hidden>
+        
+        <!-- Album Art -->
+        <div class="album-art-section">
+          <div class="album-art-wrapper" id="trackimage">
+            <img class="noalbumart" src="/icon/org.gnome.Rhythmbox3-symbolic/128" alt="Album Art">
+          </div>
+        </div>
 
-		<div class="pure-u-1-1">
-			<div id="connectform">
-				<form class="pure-form" id="connectform">
-					<input type="password" id="accesskey" placeholder="Enter passphrase"/>
-					<button type="submit" class="pure-button" id="connectbutton">
-						<img src="/icon/go-next-symbolic/24">
-					</button>
-				</form>
-			</div>
-			<div id="trackbits">
-				<div id="tracktitle"></div>
-				<span id="trackartist"></span>
-				&#183;
-				<span id="trackalbum"></span>
-				<div>
-					<span id="trackposition">00:00</span>
-					/
-					<span id="trackduration">00:00</span>
-				</div>
-			</div>
-		</div>
+        <!-- Track Info -->
+        <div class="track-info-section">
+          <h1 class="track-title" id="tracktitle">Not Playing</h1>
+          <p class="track-details">
+            <span id="trackartist">Unknown Artist</span>
+            <span class="separator">•</span>
+            <span id="trackalbum">Unknown Album</span>
+          </p>
+        </div>
 
-		<div class="pure-u-1-1" id="seekbar">
-			<div class="pure-g">
-				<div class="pure-u-1-4"></div>
-				<div class="pure-u-1-2">
-					<input type="range" id="seekbar-range"></input>
-				</div>
-				<div class="pure-u-1-4"></div>
-			</div>
-		</div>
+        <!-- Progress Bar -->
+        <div class="progress-section">
+          <div class="time-labels">
+            <span id="trackposition">0:00</span>
+            <span id="trackduration">0:00</span>
+          </div>
+          <input type="range" id="seekbar-range" class="seekbar" min="0" max="100" value="0">
+        </div>
 
-		<div class="pure-u-1-1" id="playerbuttons">
-			<div class="pure-g">
-				<div class="pure-u-1-3">
-					<div class="pure-button playerbutton" id="previous">
-						<img src="/icon/media-skip-backward-symbolic/48">
-					</div>
-				</div>
-				<div class="pure-u-1-3">
-					<div class="pure-button playerbutton" id="playpause">
-						<img src="/icon/media-playback-start-symbolic/48">
-					</div>
-				</div>
-				<div class="pure-u-1-3">
-					<div class="pure-button playerbutton" id="next">
-						<img src="/icon/media-skip-forward-symbolic/48">
-					</div>
-				</div>
-			</div>
-		</div>
+        <!-- Main Controls -->
+        <div class="controls-section">
+          <div class="main-controls">
+            <button class="control-btn" id="previous" aria-label="Previous">
+              <img src="/icon/media-skip-backward-symbolic/48" alt="Previous">
+            </button>
+            <button class="control-btn play-btn" id="playpause" aria-label="Play/Pause">
+              <img src="/icon/media-playback-start-symbolic/48" alt="Play">
+            </button>
+            <button class="control-btn" id="next" aria-label="Next">
+              <img src="/icon/media-skip-forward-symbolic/48" alt="Next">
+            </button>
+          </div>
+        </div>
 
-		<div class="pure-u-1-1">
-			<!-- not quite ready -->
-			<!-- <div id="stream"><input type="checkbox" id="stream-check">stream</div> -->
-			<div id="connection">
-				<div id="connectionhostname"></div>
-			</div>
-		</div>
-	</div>
-</div>
-<div id="stream-container"/>
+        <!-- Secondary Controls -->
+        <div class="secondary-controls">
+          <div class="volume-control">
+            <button class="secondary-btn" id="volume-btn" aria-label="Volume" title="Volume">
+              <img src="/icon/audio-volume-high-symbolic/24" alt="Volume">
+            </button>
+          </div>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="connection-status">
+          <span id="connectionhostname"></span>
+        </div>
+
+      </div>
+    </div>
+  </div>
+  <div id="stream-container"></div>
 </body>
 </html>
