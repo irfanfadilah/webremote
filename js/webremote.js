@@ -11,6 +11,16 @@ var s = null;
 
 var accesskey = '';
 
+// volume state tracking
+var currentVolumeLevel = 'full'; // enum: 'muted', 'low', 'medium', 'full'
+var volumeLevels = {
+  muted: 0.0,
+  low: 0.4,
+  medium: 0.7,
+  full: 1.0
+};
+var volumeCycle = ['muted', 'low', 'medium', 'full'];
+
 var sign = function (path) {
   sh = new SipHash();
   ts = new Date().getTime();
@@ -22,6 +32,7 @@ var pad = function (str, len, chr, left) {
   var padding = (str.length >= len) ? '' : new Array(1 + len - str.length >>> 0).join(chr);
   return left ? str + padding : padding + str;
 };
+
 var timestr = function (s) {
   var h = Math.floor(s / (60 * 60));
   var m = Math.floor((s % (60 * 60)) / 60);
@@ -99,7 +110,6 @@ var createAudioTag = function () {
 var replaceImage = function (element, imgclass, imgsrc) {
   img = document.createElement("img");
   img.setAttribute("class", imgclass);
-
   img.setAttribute("src", imgsrc);
 
   e = document.getElementById(element);
@@ -111,22 +121,58 @@ var replaceImage = function (element, imgclass, imgsrc) {
 
 var connectionState = function (connected) {
   document.getElementById("connectform").hidden = connected;
-  document.getElementById("trackbits").hidden = !connected;
-  document.getElementById("seekbar").hidden = !connected;
-  pb = document.getElementById("playerbuttons");
-  if (connected) {
-    pb.classList.remove("pure-button-disabled");
-  } else {
-    pb.classList.add("pure-button-disabled");
-  }
-}
+  document.getElementById("player-interface").hidden = !connected;
+};
 
+var getVolumeLevelFromValue = function (volume) {
+  // convert numeric volume to enum level with tolerance
+  if (volume < 0.05) return 'muted';
+  if (volume < 0.55) return 'low';
+  if (volume < 0.85) return 'medium';
+  return 'full';
+};
+
+var updateVolumeUI = function (volume) {
+  currentVolumeLevel = getVolumeLevelFromValue(volume);
+
+  var btn = document.getElementById("volume-btn");
+  var icon = btn.querySelector("img");
+
+  var volumeConfig = {
+    muted: {
+      icon: "/icon/audio-volume-muted-symbolic/24",
+      alt: "Muted",
+      title: "Volume: 0%"
+    },
+    low: {
+      icon: "/icon/audio-volume-low-symbolic/24",
+      alt: "Low Volume",
+      title: "Volume: 40%"
+    },
+    medium: {
+      icon: "/icon/audio-volume-medium-symbolic/24",
+      alt: "Medium Volume",
+      title: "Volume: 70%"
+    },
+    full: {
+      icon: "/icon/audio-volume-high-symbolic/24",
+      alt: "High Volume",
+      title: "Volume: 100%"
+    }
+  };
+
+  var config = volumeConfig[currentVolumeLevel];
+  icon.src = config.icon;
+  icon.alt = config.alt;
+  btn.title = config.title;
+};
 
 var connect = function () {
   accesskey = document.getElementById("accesskey").value;
 
   loc = document.location.hostname + ":" + document.location.port;
   s = new WebSocket("ws://" + loc + "/ws/player:" + sign("/ws/player"));
+
   s.onopen = function (event) {
     connectionState(true);
     msg = { "action": "status" };
@@ -141,16 +187,20 @@ var connect = function () {
 
     connectionState(false);
   };
+
   s.onmessage = function (event) {
     m = JSON.parse(event.data);
+
     if ("shutdown" in m) {
       if (streaming) {
         toggleStreaming();
       }
     }
+
     if ("hostname" in m) {
       document.getElementById("connectionhostname").textContent = m['hostname'];
     }
+
     if ("id" in m) {
       lastposition = 0;
       document.getElementById("seekbar-range").value = 0;
@@ -160,22 +210,27 @@ var connect = function () {
         createAudioTag();
       }
     }
+
     if ("title" in m) {
       document.title = m.title;
       document.getElementById("tracktitle").textContent = m.title;
     }
+
     if ("artist" in m) {
       document.getElementById("trackartist").textContent = m.artist;
     }
+
     if ("album" in m) {
       document.getElementById("trackalbum").textContent = m.album;
     }
+
     if ("duration" in m) {
       range = document.getElementById("seekbar-range");
       range.max = m.duration * 1000;
       range.min = 0;
       document.getElementById('trackduration').textContent = timestr(m.duration);
     }
+
     if ("playing" in m) {
       if (m.playing) {
         iconname = "media-playback-pause-symbolic";
@@ -198,6 +253,7 @@ var connect = function () {
 
       replaceImage("playpause", "", "/icon/" + iconname + "/48");
     }
+
     if ("position" in m) {
       lastposition = m.position;
       document.getElementById("seekbar-range").value = m.position;
@@ -209,6 +265,7 @@ var connect = function () {
         audioTimeSync();
       }
     }
+
     if ("albumart" in m) {
       if (m.albumart != null) {
         path = "/art/" + m.albumart;
@@ -219,6 +276,11 @@ var connect = function () {
         imgclass = "noalbumart";
       }
       replaceImage("trackimage", imgclass, imgsrc);
+    }
+
+    // handle volume updates
+    if ("volume" in m) {
+      updateVolumeUI(m.volume);
     }
   };
 
@@ -237,6 +299,20 @@ var seekinput = function () {
   }
 };
 
+var volumeToggle = function () {
+  // cycle through: muted -> low -> medium -> full -> muted
+  var currentIndex = volumeCycle.indexOf(currentVolumeLevel);
+  var nextIndex = (currentIndex + 1) % volumeCycle.length;
+  var nextLevel = volumeCycle[nextIndex];
+  var nextVolume = volumeLevels[nextLevel];
+
+  // update UI immediately
+  updateVolumeUI(nextVolume);
+
+  // send to backend
+  s.send(JSON.stringify({ 'action': 'volume', 'volume': nextVolume }));
+};
+
 var toggleStreaming = function () {
   if (streaming) {
     streaming = false;
@@ -251,17 +327,19 @@ var toggleStreaming = function () {
 };
 
 window.onload = function () {
+  // main controls
   document.getElementById("previous").addEventListener('click', sendevent);
   document.getElementById("playpause").addEventListener('click', sendevent);
   document.getElementById("next").addEventListener('click', sendevent);
 
+  // seekbar
   document.getElementById("seekbar-range").addEventListener('input', seekinput);
 
-  // document.getElementById("stream-check").addEventListener('click', toggleStreaming);
+  // volume control
+  document.getElementById("volume-btn").addEventListener('click', volumeToggle);
 
-  document.getElementById("connectform").onsubmit = connect;
-
-  connectionState(false);
+  // connection form
+  document.getElementById("connect-form").onsubmit = connect;
 }
 
 // siphash implementation from https://github.com/jedisct1/siphash-js
