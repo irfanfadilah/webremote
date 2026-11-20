@@ -15,9 +15,7 @@ webremote_plugin_descriptor = custom_target('webremote-plugin-descriptor',
   install: true,
   install_dir: webremote_plugin_dir)
 
-install_data([
-  'css/bulma.min.css',
-  'css/webremote.css'],
+install_data('css/webremote.css',
   install_dir: webremote_plugin_data_dir + '/css')
 
 install_data('js/webremote.js',

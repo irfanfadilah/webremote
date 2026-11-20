@@ -9,8 +9,12 @@ Web-based remote control plugin for Rhythmbox.
 ## Features
 
 - All the features from original plugin
-- New responsive dark UI
+- Search your library by title, artist, album or genre, and tap a song to play it
+- Browse every song in the library (loads more as you scroll)
+- Material You design with the Nord color palette, in light or dark to match your system
+- Responsive layout for phones, tablets and desktops
 - New volume control
+- Keyboard shortcuts on desktop: `/` to search, `Space` to play/pause
 
 ## Installation
 
@@ -40,8 +44,8 @@ rm webremote.zip
 
 ## New Volume Control
 
-Click the volume icon to cycle through volume levels:
-- **0%** - Muted (no bars)
+Click the volume button to cycle through volume levels. The button shows the current level next to the icon:
+- **Muted** - 0% (no bars)
 - **40%** - Low (1 bar)
 - **70%** - Medium (2 bars)
 - **100%** - High/Full (3 bars)

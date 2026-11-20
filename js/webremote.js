@@ -1,15 +1,19 @@
-
 var timer = null;
 var lasttime = null;
-var seeking = false;
+var dragging = false; // user is moving the seekbar thumb
 var lastposition = 0.0;
 
 var streaming = false;
 var needsync = false;
 var audiotag = null;
 var s = null;
+var everConnected = false;
 
 var accesskey = '';
+
+// currently playing entry, as reported by the plugin
+var currentId = 0;
+var isPlaying = false;
 
 // volume state tracking
 var currentVolumeLevel = 'full'; // enum: 'muted', 'low', 'medium', 'full'
@@ -21,10 +25,30 @@ var volumeLevels = {
 };
 var volumeCycle = ['muted', 'low', 'medium', 'full'];
 
+// playback mode
+var shuffleOn = false;
+var repeatMode = 'off'; // 'off', 'all', 'one'
+var repeatCycle = ['off', 'all', 'one'];
+
+// library search / listing state
+var SEARCH_PAGE_SIZE = 50;
+var SEARCH_DEBOUNCE_MS = 200;
+var search = {
+  query: '',
+  seq: 0,
+  offset: 0,
+  total: 0,
+  loading: false,
+  done: false,
+  debounce: null,
+  sort: null,   // column picked in the header; null = library order
+  order: 'asc'
+};
+
 var sign = function (path) {
-  sh = new SipHash();
-  ts = new Date().getTime();
-  message = path + "\n" + ts;
+  var sh = new SipHash();
+  var ts = new Date().getTime();
+  var message = path + "\n" + ts;
   return "sig=" + sh.hash_hex(sh.string_to_key(accesskey), message) + "&ts=" + ts;
 };
 
@@ -38,24 +62,54 @@ var timestr = function (s) {
   var m = Math.floor((s % (60 * 60)) / 60);
   var sec = Math.floor(s % 60);
   if (h >= 1) {
-    return pad(h.toString(), 2, '0', false) + ":" +
+    return h.toString() + ":" +
       pad(m.toString(), 2, '0', false) + ":" +
       pad(sec.toString(), 2, '0', false);
   } else {
-    return pad(m.toString(), 2, '0', false) + ":" +
-      pad(sec.toString(), 2, '0', false);
+    return m.toString() + ":" + pad(sec.toString(), 2, '0', false);
   }
 };
 
+var $ = function (id) {
+  return document.getElementById(id);
+};
+
+var svgIcon = function (name, className) {
+  var ns = "http://www.w3.org/2000/svg";
+  var svg = document.createElementNS(ns, "svg");
+  if (className) {
+    svg.setAttribute("class", className);
+  }
+  var use = document.createElementNS(ns, "use");
+  use.setAttribute("href", "#" + name);
+  svg.appendChild(use);
+  return svg;
+};
+
+var setIcon = function (button, name) {
+  button.querySelector("use").setAttribute("href", "#" + name);
+};
+
+// ---------- playback position ----------
+
+var setPosition = function (ms) {
+  var range = $("seekbar-range");
+  range.value = ms;
+  var max = parseFloat(range.max) || 0;
+  var pct = max > 0 ? Math.min(100, (ms / max) * 100) : 0;
+  range.style.setProperty("--progress", pct + "%");
+  $("trackposition").textContent = timestr(ms / 1000);
+};
+
 var tick = function () {
-  now = new Date();
+  var now = new Date();
   var elapsed = (now.getTime() - lasttime.getTime());
   lasttime = now;
 
-  if (seeking === false) {
-    lastposition = lastposition + elapsed;
-    document.getElementById("seekbar-range").value = lastposition;
-    document.getElementById("trackposition").textContent = timestr(lastposition / 1000);
+  // keep counting while the user drags, but don't move the thumb under them
+  lastposition = lastposition + elapsed;
+  if (!dragging) {
+    setPosition(lastposition);
   }
 
   if (streaming && needsync) {
@@ -63,8 +117,10 @@ var tick = function () {
   }
 };
 
+// ---------- optional local audio streaming ----------
+
 var audioCanSeekTo = function (seektime) {
-  for (i = 0; i < audiotag.seekable.length; i++) {
+  for (var i = 0; i < audiotag.seekable.length; i++) {
     if (audiotag.seekable.start(i) > seektime) {
       return false;
     }
@@ -78,7 +134,6 @@ var audioCanSeekTo = function (seektime) {
 var audioTimeSync = function () {
   if (needsync) {
     if (audioCanSeekTo(lastposition / 1000)) {
-      // probably check seekable ranges and stuff?
       audiotag.currentTime = lastposition / 1000;
 
       if (timer != null) {
@@ -93,35 +148,63 @@ var createAudioTag = function () {
   audiotag = document.createElement("audio");
   // plugin should give us direct stream urls if they exist
   // and should tell us if the thing can't be streamed (cdda etc.) too
-  path = "/entry/current/stream";
+  var path = "/entry/current/stream";
   audiotag.setAttribute("src", path + "?" + sign(path));
   audiotag.setAttribute("preload", "auto");
 
   audiotag.addEventListener('canplay', audioTimeSync);
   needsync = true;
 
-  c = document.getElementById("stream-container");
+  var c = $("stream-container");
   while (c.firstChild) {
     c.removeChild(c.firstChild);
   }
   c.appendChild(audiotag);
 };
 
-var replaceImage = function (element, imgclass, imgsrc) {
-  img = document.createElement("img");
-  img.setAttribute("class", imgclass);
-  img.setAttribute("src", imgsrc);
-
-  e = document.getElementById(element);
-  while (e.firstChild) {
-    e.removeChild(e.firstChild);
+var toggleStreaming = function () {
+  if (streaming) {
+    streaming = false;
+    audiotag.pause();
+    $("stream-container").removeChild(audiotag);
+    audiotag = null;
+  } else {
+    streaming = true;
+    createAudioTag();
   }
-  e.appendChild(img);
 };
 
+// ---------- album art ----------
+
+var artUrl = function (albumart) {
+  var path = "/art/" + albumart;
+  return path + "?" + sign(path);
+};
+
+// fill a container with album art, or a music note when there is none
+var setArt = function (container, albumart, placeholderClass) {
+  while (container.firstChild) {
+    container.removeChild(container.firstChild);
+  }
+  if (albumart) {
+    var img = document.createElement("img");
+    img.alt = "";
+    img.decoding = "async";
+    img.src = artUrl(albumart);
+    img.onerror = function () {
+      setArt(container, null, placeholderClass);
+    };
+    container.appendChild(img);
+  } else {
+    container.appendChild(svgIcon("i-note", placeholderClass));
+  }
+};
+
+// ---------- connection ----------
+
 var connectionState = function (connected) {
-  document.getElementById("connectform").hidden = connected;
-  document.getElementById("player-interface").hidden = !connected;
+  $("connectform").hidden = connected;
+  $("player-interface").hidden = !connected;
 };
 
 var getVolumeLevelFromValue = function (volume) {
@@ -135,61 +218,89 @@ var getVolumeLevelFromValue = function (volume) {
 var updateVolumeUI = function (volume) {
   currentVolumeLevel = getVolumeLevelFromValue(volume);
 
-  var btn = document.getElementById("volume-btn");
-  var icon = btn.querySelector("img");
+  // presets read "Muted", "40%", "70%", "100%"; a volume set in Rhythmbox
+  // itself shows its real percentage
+  var percent = Math.round(volume * 100);
+  var label = percent === 0 ? "Muted" : percent + "%";
 
-  var volumeConfig = {
-    muted: {
-      icon: "/icon/audio-volume-muted-symbolic/24",
-      alt: "Muted",
-      title: "Volume: 0%"
-    },
-    low: {
-      icon: "/icon/audio-volume-low-symbolic/24",
-      alt: "Low Volume",
-      title: "Volume: 40%"
-    },
-    medium: {
-      icon: "/icon/audio-volume-medium-symbolic/24",
-      alt: "Medium Volume",
-      title: "Volume: 70%"
-    },
-    full: {
-      icon: "/icon/audio-volume-high-symbolic/24",
-      alt: "High Volume",
-      title: "Volume: 100%"
+  var buttons = document.querySelectorAll("[data-volume]");
+  for (var i = 0; i < buttons.length; i++) {
+    setIcon(buttons[i], "i-vol-" + currentVolumeLevel);
+    buttons[i].querySelector(".volume-label").textContent = label;
+    buttons[i].title = "Volume: " + label + " (click to change)";
+    buttons[i].setAttribute("aria-label", "Volume: " + label);
+  }
+};
+
+var setPlaying = function (playing) {
+  isPlaying = playing;
+  var btn = $("playpause");
+  setIcon(btn, playing ? "i-pause" : "i-play");
+  btn.setAttribute("aria-label", playing ? "Pause" : "Play");
+  $("player-interface").classList.toggle("is-playing", playing);
+};
+
+var updateTrackSubtitle = function () {
+  var hasArtist = $("trackartist").textContent !== "";
+  var hasAlbum = $("trackalbum").textContent !== "";
+  $("trackdot").hidden = !(hasArtist && hasAlbum);
+};
+
+var markCurrentSong = function () {
+  var rows = $("song-list").children;
+  for (var i = 0; i < rows.length; i++) {
+    var current = parseInt(rows[i].dataset.id, 10) === currentId;
+    rows[i].classList.toggle("is-current", current);
+    if (current) {
+      rows[i].setAttribute("aria-current", "true");
+    } else {
+      rows[i].removeAttribute("aria-current");
     }
-  };
+  }
+};
 
-  var config = volumeConfig[currentVolumeLevel];
-  icon.src = config.icon;
-  icon.alt = config.alt;
-  btn.title = config.title;
+var send = function (msg) {
+  if (s && s.readyState === WebSocket.OPEN) {
+    s.send(JSON.stringify(msg));
+  }
 };
 
 var connect = function () {
-  accesskey = document.getElementById("accesskey").value;
+  accesskey = $("accesskey").value;
+  everConnected = false;
+  $("connect-error").hidden = true;
 
-  loc = document.location.hostname + ":" + document.location.port;
+  var loc = document.location.hostname + ":" + document.location.port;
   s = new WebSocket("ws://" + loc + "/ws/player:" + sign("/ws/player"));
 
   s.onopen = function (event) {
+    everConnected = true;
     connectionState(true);
-    msg = { "action": "status" };
-    s.send(JSON.stringify(msg));
+    send({ "action": "status" });
+    newSearch($("search-input").value);
   };
 
   s.onclose = function (event) {
-    document.getElementById("connectionhostname").textContent = "";
+    $("connectionhostname").textContent = "";
     window.clearInterval(timer);
     timer = null;
     lasttime = null;
 
+    var error = $("connect-error");
+    error.textContent = everConnected ?
+      "Connection to Rhythmbox was lost. Connect again to continue." :
+      "Couldn't connect. Check the passphrase and try again.";
+    error.hidden = false;
     connectionState(false);
   };
 
   s.onmessage = function (event) {
-    m = JSON.parse(event.data);
+    var m = JSON.parse(event.data);
+
+    if ("search" in m) {
+      handleSearchResults(m.search);
+      return;
+    }
 
     if ("shutdown" in m) {
       if (streaming) {
@@ -198,13 +309,23 @@ var connect = function () {
     }
 
     if ("hostname" in m) {
-      document.getElementById("connectionhostname").textContent = m['hostname'];
+      $("connectionhostname").textContent = m.hostname;
     }
 
     if ("id" in m) {
       lastposition = 0;
-      document.getElementById("seekbar-range").value = 0;
-      document.getElementById("trackposition").textContent = timestr(0);
+      setPosition(0);
+      currentId = m.id;
+      markCurrentSong();
+
+      if (m.id === 0) {
+        document.title = "Rhythmbox Remote";
+        $("tracktitle").textContent = "Not Playing";
+        $("trackartist").textContent = "";
+        $("trackalbum").textContent = "";
+        updateTrackSubtitle();
+        setArt($("trackimage"), null, "art-placeholder");
+      }
 
       if (streaming) {
         createAudioTag();
@@ -212,28 +333,33 @@ var connect = function () {
     }
 
     if ("title" in m) {
-      document.title = m.title;
-      document.getElementById("tracktitle").textContent = m.title;
+      document.title = m.title || "Rhythmbox Remote";
+      $("tracktitle").textContent = m.title || "Unknown Title";
     }
 
     if ("artist" in m) {
-      document.getElementById("trackartist").textContent = m.artist;
+      $("trackartist").textContent = m.artist || "";
+      updateTrackSubtitle();
     }
 
     if ("album" in m) {
-      document.getElementById("trackalbum").textContent = m.album;
+      $("trackalbum").textContent = m.album || "";
+      updateTrackSubtitle();
     }
 
     if ("duration" in m) {
-      range = document.getElementById("seekbar-range");
+      var range = $("seekbar-range");
       range.max = m.duration * 1000;
       range.min = 0;
-      document.getElementById('trackduration').textContent = timestr(m.duration);
+      $("trackduration").textContent = timestr(m.duration);
+      if (!dragging) {
+        setPosition(lastposition);
+      }
     }
 
     if ("playing" in m) {
+      setPlaying(m.playing);
       if (m.playing) {
-        iconname = "media-playback-pause-symbolic";
         if (timer == null) {
           timer = window.setInterval(tick, 250);
           lasttime = new Date();
@@ -242,7 +368,6 @@ var connect = function () {
           audiotag.play();
         }
       } else {
-        iconname = "media-playback-start-symbolic";
         window.clearInterval(timer);
         timer = null;
         lasttime = null;
@@ -250,15 +375,13 @@ var connect = function () {
           audiotag.pause();
         }
       }
-
-      replaceImage("playpause", "", "/icon/" + iconname + "/48");
     }
 
     if ("position" in m) {
       lastposition = m.position;
-      document.getElementById("seekbar-range").value = m.position;
-      document.getElementById('trackposition').textContent = timestr(m.position / 1000);
-      seeking = false;
+      if (!dragging) {
+        setPosition(m.position);
+      }
 
       if (streaming) {
         needsync = true;
@@ -267,80 +390,414 @@ var connect = function () {
     }
 
     if ("albumart" in m) {
-      if (m.albumart != null) {
-        path = "/art/" + m.albumart;
-        imgsrc = path + "?" + sign(path);
-        imgclass = "albumart";
-      } else {
-        imgsrc = "/icon/org.gnome.Rhythmbox3-symbolic/128";
-        imgclass = "noalbumart";
-      }
-      replaceImage("trackimage", imgclass, imgsrc);
+      setArt($("trackimage"), m.albumart, "art-placeholder");
     }
 
-    // handle volume updates
     if ("volume" in m) {
       updateVolumeUI(m.volume);
+    }
+
+    if ("shuffle" in m || "repeat" in m) {
+      updatePlayModeUI("shuffle" in m ? m.shuffle : shuffleOn,
+                       "repeat" in m ? m.repeat : repeatMode);
     }
   };
 
   return false;
 };
 
-var sendevent = function () {
-  s.send(JSON.stringify({ 'action': this.id }));
+// ---------- library search ----------
+
+var setListStatus = function (node) {
+  var status = $("list-status");
+  while (status.firstChild) {
+    status.removeChild(status.firstChild);
+  }
+  if (node) {
+    status.appendChild(node);
+  }
 };
 
-var seekinput = function () {
-  if (seeking === false) {
-    time = this.value / 1000;
-    s.send(JSON.stringify({ 'action': 'seek', 'time': time }));
-    seeking = true;
+var spinner = function () {
+  var span = document.createElement("span");
+  span.className = "spinner";
+  span.setAttribute("role", "progressbar");
+  span.setAttribute("aria-label", "Loading");
+  return span;
+};
+
+var emptyState = function (text) {
+  var div = document.createElement("div");
+  div.className = "empty-state";
+  div.appendChild(svgIcon("i-search"));
+  div.appendChild(document.createTextNode(text));
+  return div;
+};
+
+var requestPage = function () {
+  search.loading = true;
+  send({
+    'action': 'search',
+    'query': search.query,
+    'offset': search.offset,
+    'limit': SEARCH_PAGE_SIZE,
+    'sort': search.sort,
+    'order': search.order,
+    'seq': search.seq
+  });
+};
+
+var newSearch = function (query) {
+  window.clearTimeout(search.debounce);
+  search.query = query.trim();
+  search.seq += 1;
+  search.offset = 0;
+  search.total = 0;
+  search.done = false;
+
+  var list = $("song-list");
+  while (list.firstChild) {
+    list.removeChild(list.firstChild);
   }
+  $("library").scrollTop = 0;
+  $("result-count").textContent = search.query ? "Searching…" : "Loading library…";
+  setListStatus(spinner());
+  requestPage();
+};
+
+var loadMore = function () {
+  if (search.loading || search.done) {
+    return;
+  }
+  setListStatus(spinner());
+  requestPage();
+};
+
+var playSong = function (id) {
+  send({ 'action': 'play', 'id': id });
+};
+
+var buildSongRow = function (song) {
+  var li = document.createElement("li");
+  li.className = "song";
+  li.dataset.id = song.id;
+  li.tabIndex = 0;
+  li.setAttribute("role", "button");
+
+  var art = document.createElement("div");
+  art.className = "song-art";
+  var slot = document.createElement("div");
+  slot.className = "song-art-slot";
+  setArt(slot, song.albumart, "");
+  art.appendChild(slot);
+  var eq = document.createElement("div");
+  eq.className = "eq";
+  eq.setAttribute("aria-hidden", "true");
+  for (var i = 0; i < 3; i++) {
+    eq.appendChild(document.createElement("span"));
+  }
+
+  var text = document.createElement("div");
+  text.className = "song-text";
+  var title = document.createElement("div");
+  title.className = "song-title";
+  title.textContent = song.title || "Unknown Title";
+  var subtitle = document.createElement("div");
+  subtitle.className = "song-subtitle";
+  subtitle.textContent = song.artist || "Unknown Artist";
+  text.appendChild(title);
+  text.appendChild(subtitle);
+
+  var artist = document.createElement("div");
+  artist.className = "song-artist";
+  artist.textContent = song.artist || "Unknown Artist";
+
+  var album = document.createElement("div");
+  album.className = "song-album";
+  album.textContent = song.album || "";
+
+  var year = document.createElement("div");
+  year.className = "song-year";
+  year.textContent = song.year ? song.year : "";
+
+  var duration = document.createElement("div");
+  duration.className = "song-duration";
+  duration.textContent = song.duration ? timestr(song.duration) : "";
+
+  li.appendChild(art);
+  li.appendChild(text);
+  li.appendChild(artist);
+  li.appendChild(album);
+  li.appendChild(year);
+  li.appendChild(duration);
+  art.appendChild(eq);
+
+  li.setAttribute("aria-label",
+    (song.title || "Unknown Title") + ", " + (song.artist || "Unknown Artist"));
+  return li;
+};
+
+var handleSearchResults = function (r) {
+  if (r.seq !== search.seq) {
+    return; // response to an outdated query
+  }
+  search.loading = false;
+
+  if (r.error) {
+    $("result-count").textContent = "Search failed";
+    setListStatus(document.createTextNode(r.error));
+    return;
+  }
+
+  var list = $("song-list");
+  var frag = document.createDocumentFragment();
+  for (var i = 0; i < r.results.length; i++) {
+    frag.appendChild(buildSongRow(r.results[i]));
+  }
+  list.appendChild(frag);
+  markCurrentSong();
+
+  search.total = r.total;
+  search.offset = r.offset + r.results.length;
+  search.done = search.offset >= r.total || r.results.length === 0;
+
+  var count = r.total.toLocaleString();
+  var noun = r.total === 1 ? " song" : " songs";
+  $("result-count").textContent = search.query ?
+    count + (r.total === 1 ? " result" : " results") : count + noun;
+
+  if (r.total === 0) {
+    setListStatus(emptyState(search.query ?
+      "No songs match “" + search.query + "”" :
+      "Your library is empty"));
+  } else {
+    setListStatus(null);
+    // the sentinel may still be visible (short page, tall screen): keep loading
+    if (!search.done && sentinelVisible()) {
+      loadMore();
+    }
+  }
+};
+
+var sentinelVisible = function () {
+  var lib = $("library").getBoundingClientRect();
+  var sentinel = $("list-sentinel").getBoundingClientRect();
+  return sentinel.top < lib.bottom + 600;
+};
+
+var onSearchInput = function () {
+  var value = $("search-input").value;
+  $("search-clear").hidden = value === "";
+  window.clearTimeout(search.debounce);
+  search.debounce = window.setTimeout(function () {
+    if (value.trim() !== search.query) {
+      newSearch(value);
+    }
+  }, SEARCH_DEBOUNCE_MS);
+};
+
+// header click: sort by that column ascending; click again to flip the order
+var sortBy = function (column) {
+  if (search.sort === column) {
+    search.order = search.order === 'asc' ? 'desc' : 'asc';
+  } else {
+    search.sort = column;
+    search.order = 'asc';
+  }
+  updateSortHeaders();
+  newSearch($("search-input").value);
+};
+
+var updateSortHeaders = function () {
+  var buttons = document.querySelectorAll(".col-sort");
+  for (var i = 0; i < buttons.length; i++) {
+    var b = buttons[i];
+    var active = b.dataset.sort === search.sort;
+    var name = b.textContent.trim();
+    b.classList.toggle("is-active", active);
+    b.classList.toggle("is-desc", active && search.order === 'desc');
+    b.setAttribute("aria-pressed", active ? "true" : "false");
+    b.setAttribute("aria-label", active ?
+      "Sorted by " + name + (search.order === 'asc' ? ", ascending" : ", descending") :
+      "Sort by " + name);
+    b.title = active ?
+      (search.order === 'asc' ? "Ascending: click for descending" : "Descending: click for ascending") :
+      "Sort by " + name;
+  }
+};
+
+var clearSearch = function () {
+  var input = $("search-input");
+  input.value = "";
+  $("search-clear").hidden = true;
+  if (search.query !== "") {
+    newSearch("");
+  }
+  input.focus();
+};
+
+// ---------- controls ----------
+
+var sendevent = function () {
+  send({ 'action': this.id });
+};
+
+// while dragging, only preview the new time
+var seekinput = function () {
+  dragging = true;
+  setPosition(parseFloat(this.value));
+};
+
+// on release (or a click / arrow key), seek once to the chosen point
+var seekchange = function () {
+  dragging = false;
+  lastposition = parseFloat(this.value);
+  setPosition(lastposition);
+  send({ 'action': 'seek', 'time': Math.floor(lastposition / 1000) });
 };
 
 var volumeToggle = function () {
   // cycle through: muted -> low -> medium -> full -> muted
   var currentIndex = volumeCycle.indexOf(currentVolumeLevel);
   var nextIndex = (currentIndex + 1) % volumeCycle.length;
-  var nextLevel = volumeCycle[nextIndex];
-  var nextVolume = volumeLevels[nextLevel];
+  var nextVolume = volumeLevels[volumeCycle[nextIndex]];
 
   // update UI immediately
   updateVolumeUI(nextVolume);
 
   // send to backend
-  s.send(JSON.stringify({ 'action': 'volume', 'volume': nextVolume }));
+  send({ 'action': 'volume', 'volume': nextVolume });
 };
 
-var toggleStreaming = function () {
-  if (streaming) {
-    streaming = false;
-    audiotag.pause();
-    c = document.getElementById("stream-container");
-    c.removeChild(audiotag);
-    audiotag = null;
-  } else {
-    streaming = true;
-    createAudioTag();
-  }
+var updatePlayModeUI = function (shuffle, repeat) {
+  shuffleOn = shuffle;
+  repeatMode = repeat;
+
+  var sb = $("shuffle");
+  var shuffleLabel = "Shuffle: " + (shuffle ? "on" : "off");
+  sb.classList.toggle("is-on", shuffle);
+  sb.setAttribute("aria-pressed", shuffle ? "true" : "false");
+  sb.setAttribute("aria-label", shuffleLabel);
+  sb.title = shuffleLabel;
+
+  var rb = $("repeat");
+  var repeatLabel = "Repeat: " + { off: "off", all: "all songs", one: "this song" }[repeat];
+  rb.dataset.mode = repeat;
+  rb.classList.toggle("is-on", repeat !== 'off');
+  setIcon(rb, repeat === 'one' ? "i-repeat-one" : "i-repeat");
+  rb.setAttribute("aria-label", repeatLabel);
+  rb.title = repeatLabel;
+};
+
+var shuffleToggle = function () {
+  updatePlayModeUI(!shuffleOn, repeatMode);
+  send({ 'action': 'playmode', 'shuffle': shuffleOn });
+};
+
+// off -> all -> one -> off
+var repeatToggle = function () {
+  var next = repeatCycle[(repeatCycle.indexOf(repeatMode) + 1) % repeatCycle.length];
+  updatePlayModeUI(shuffleOn, next);
+  send({ 'action': 'playmode', 'repeat': next });
+};
+
+var isTyping = function (el) {
+  return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
 };
 
 window.onload = function () {
   // main controls
-  document.getElementById("previous").addEventListener('click', sendevent);
-  document.getElementById("playpause").addEventListener('click', sendevent);
-  document.getElementById("next").addEventListener('click', sendevent);
+  $("previous").addEventListener('click', sendevent);
+  $("playpause").addEventListener('click', sendevent);
+  $("next").addEventListener('click', sendevent);
+  $("shuffle").addEventListener('click', shuffleToggle);
+  $("repeat").addEventListener('click', repeatToggle);
 
   // seekbar
-  document.getElementById("seekbar-range").addEventListener('input', seekinput);
+  $("seekbar-range").addEventListener('input', seekinput);
+  $("seekbar-range").addEventListener('change', seekchange);
 
-  // volume control
-  document.getElementById("volume-btn").addEventListener('click', volumeToggle);
+  // volume control (one button on mobile, one on desktop)
+  var volumeButtons = document.querySelectorAll("[data-volume]");
+  for (var i = 0; i < volumeButtons.length; i++) {
+    volumeButtons[i].addEventListener('click', volumeToggle);
+  }
+
+  // search
+  var input = $("search-input");
+  input.addEventListener('input', onSearchInput);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === "Escape") {
+      clearSearch();
+    } else if (e.key === "Enter") {
+      window.clearTimeout(search.debounce);
+      if (input.value.trim() !== search.query) {
+        newSearch(input.value);
+      }
+      input.blur(); // hide the on-screen keyboard on phones
+    }
+  });
+  $("search-clear").addEventListener('click', clearSearch);
+
+  // column header sorting (desktop layout)
+  $("list-columns").addEventListener('click', function (e) {
+    var b = e.target.closest(".col-sort");
+    if (b) {
+      sortBy(b.dataset.sort);
+    }
+  });
+  updateSortHeaders();
+
+  // song list: click or Enter/Space on a row plays it
+  var list = $("song-list");
+  list.addEventListener('click', function (e) {
+    var row = e.target.closest(".song");
+    if (row) {
+      playSong(parseInt(row.dataset.id, 10));
+    }
+  });
+  list.addEventListener('keydown', function (e) {
+    var row = e.target.closest(".song");
+    if (row && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      playSong(parseInt(row.dataset.id, 10));
+    }
+  });
+
+  // infinite scroll
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(function (entries) {
+      if (entries[0].isIntersecting) {
+        loadMore();
+      }
+    }, { root: $("library"), rootMargin: "600px 0px" }).observe($("list-sentinel"));
+  } else {
+    $("library").addEventListener('scroll', function () {
+      if (sentinelVisible()) {
+        loadMore();
+      }
+    });
+  }
+
+  // keyboard shortcuts: "/" focuses search, space toggles playback
+  document.addEventListener('keydown', function (e) {
+    if ($("player-interface").hidden || isTyping(document.activeElement) ||
+        e.ctrlKey || e.metaKey || e.altKey) {
+      return;
+    }
+    if (e.key === "/") {
+      e.preventDefault();
+      input.focus();
+    } else if (e.key === " " && !e.target.closest("button, .song, input")) {
+      e.preventDefault();
+      send({ 'action': 'playpause' });
+    }
+  });
 
   // connection form
-  document.getElementById("connect-form").onsubmit = connect;
-}
+  $("connect-form").onsubmit = connect;
+  $("accesskey").focus();
+};
 
 // siphash implementation from https://github.com/jedisct1/siphash-js
 

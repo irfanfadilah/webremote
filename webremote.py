@@ -36,6 +36,7 @@ import json
 import re
 import time
 import struct
+import unicodedata
 
 import siphash
 
@@ -73,7 +74,10 @@ class ClientSession(object):
 			'previous': self.plugin.client_previous,
 			'playpause': self.plugin.client_playpause,
 			'seek': self.plugin.client_seek,
-			'volume': self.plugin.client_volume
+			'volume': self.plugin.client_volume,
+			'search': self.plugin.client_search,
+			'play': self.plugin.client_play,
+			'playmode': self.plugin.client_playmode
 		}
 
 	def message_cb(self, conn, msgtype, message):
@@ -214,6 +218,14 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 		self.access_key = None
 
 		self.listen_reset = False
+		self.library_cache = None
+		self.sorted_cache = {}
+
+		# Rhythmbox has no "repeat one" play order, so the plugin does it:
+		# when a song finishes on its own, play it again
+		self.repeat_one = False
+		self.current_entry = None
+		self.elapsed = 0
 
 	def get_sign_key(self, id):
 		# some day there will be multiple keys
@@ -332,8 +344,52 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 		
 		# Add volume state
 		m['volume'] = self.shell_player.get_volume()[1]
-		
+
+		m.update(self.playmode_state())
 		return m
+
+	def playmode_state(self):
+		(r, shuffle, repeat) = self.shell_player.get_playback_state()
+		if not repeat:
+			self.repeat_one = False
+		if self.repeat_one:
+			mode = 'one'
+		elif repeat:
+			mode = 'all'
+		else:
+			mode = 'off'
+		return {'shuffle': bool(shuffle), 'repeat': mode}
+
+	def client_playmode(self, message):
+		try:
+			(r, shuffle, repeat) = self.shell_player.get_playback_state()
+			if 'shuffle' in message:
+				shuffle = bool(message['shuffle'])
+			mode = message.get('repeat')
+			if mode in ('off', 'all', 'one'):
+				# "one" keeps Rhythmbox's own repeat on, the closest built-in mode
+				repeat = mode != 'off'
+				self.repeat_one = mode == 'one'
+			self.shell_player.set_playback_state(shuffle, repeat)
+			state = self.playmode_state()
+			self.dispatch(state)
+			r = {'result': 'ok'}
+			r.update(state)
+			return r
+		except Exception as e:
+			return {'result': str(e)}
+
+	def play_order_changed_cb(self, player, pspec):
+		# shuffle/repeat changed, possibly from Rhythmbox's own window
+		self.dispatch(self.playmode_state())
+
+	def replay_entry(self, entry):
+		try:
+			source = self.shell_player.get_playing_source() or self.object.props.library_source
+			self.shell_player.play_entry(entry, source)
+		except Exception as e:
+			sys.excepthook(*sys.exc_info())
+		return False
 
 	def client_next(self, message):
 		try:
@@ -358,8 +414,12 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 
 	def client_seek(self, message):
 		try:
-			self.shell_player.set_playing_time(message['time'])
-			return {'result': 'ok'}
+			self.shell_player.set_playing_time(max(0, int(message['time'])))
+			# Rhythmbox doesn't announce the new position when paused or for
+			# small jumps, so report it to the client directly
+			r = {'result': 'ok'}
+			self.set_playing_position(r)
+			return r
 		except Exception as e:
 			return {'result': str(e) }
 
@@ -377,7 +437,126 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 			return {'result': str(e)}
 
 
+
+	search_limit_default = 50
+	search_limit_max = 200
+	search_props = (
+		RB.RhythmDBPropType.TITLE,
+		RB.RhythmDBPropType.ARTIST,
+		RB.RhythmDBPropType.ALBUM,
+	)
+
+	@staticmethod
+	def fold(text):
+		# case- and accent-insensitive form used for matching and sorting
+		text = unicodedata.normalize('NFKD', text or '')
+		return ''.join(c for c in text if not unicodedata.combining(c)).casefold()
+
+	# columns the client can sort by
+	sort_columns = ('title', 'artist', 'album', 'year', 'duration')
+
+	def invalidate_library_cache(self, *args):
+		self.library_cache = None
+		self.sorted_cache = {}
+
+	def get_library(self):
+		# list of (entry, folded search text, column sort values), sorted like
+		# the library view: artist, album, disc, track, title.
+		# rebuilt lazily after db changes.
+		if self.library_cache is not None:
+			return self.library_cache
+
+		rows = []
+		def collect(entry):
+			if entry.get_boolean(RB.RhythmDBPropType.HIDDEN):
+				return
+			artist = self.fold(entry.get_string(RB.RhythmDBPropType.ALBUM_ARTIST) or
+					   entry.get_string(RB.RhythmDBPropType.ARTIST))
+			sortkey = (artist,
+				   self.fold(entry.get_string(RB.RhythmDBPropType.ALBUM)),
+				   entry.get_ulong(RB.RhythmDBPropType.DISC_NUMBER),
+				   entry.get_ulong(RB.RhythmDBPropType.TRACK_NUMBER),
+				   self.fold(entry.get_string(RB.RhythmDBPropType.TITLE)))
+			text = '\n'.join(self.fold(entry.get_string(p)) for p in self.search_props)
+			# None marks an unknown value; those always sort last
+			values = {
+				'title': self.fold(entry.get_string(RB.RhythmDBPropType.TITLE)) or None,
+				'artist': self.fold(entry.get_string(RB.RhythmDBPropType.ARTIST)) or None,
+				'album': self.fold(entry.get_string(RB.RhythmDBPropType.ALBUM)) or None,
+				'year': entry.get_ulong(RB.RhythmDBPropType.YEAR) or None,
+				'duration': entry.get_ulong(RB.RhythmDBPropType.DURATION) or None,
+			}
+			rows.append((sortkey, entry, text, values))
+
+		self.db.entry_foreach_by_type(self.db.entry_type_get_by_name('song'), collect)
+		rows.sort(key=lambda r: r[0])
+		self.library_cache = [(entry, text, values) for (sortkey, entry, text, values) in rows]
+		return self.library_cache
+
+	def get_sorted_library(self, sort, descending):
+		# the library sorted by one column; ties keep library order
+		if sort not in self.sort_columns:
+			return self.get_library()
+
+		key = (sort, descending)
+		if key not in self.sorted_cache:
+			rows = self.get_library()
+			known = [r for r in rows if r[2][sort] is not None]
+			unknown = [r for r in rows if r[2][sort] is None]
+			known.sort(key=lambda r: r[2][sort], reverse=descending)
+			self.sorted_cache[key] = known + unknown
+		return self.sorted_cache[key]
+
+	def client_search(self, message):
+		try:
+			query = str(message.get('query') or '')
+			offset = max(0, int(message.get('offset', 0)))
+			limit = int(message.get('limit', self.search_limit_default))
+			limit = max(1, min(self.search_limit_max, limit))
+
+			sort = message.get('sort')
+			descending = message.get('order') == 'desc'
+
+			# every word must appear in the title, artist or album
+			words = self.fold(query).split()
+			matches = [entry for (entry, text, values) in self.get_sorted_library(sort, descending)
+				   if all(w in text for w in words)]
+
+			results = [self.entry_details(e) for e in matches[offset:offset + limit]]
+			return {'search': {
+				'seq': message.get('seq'),
+				'query': query,
+				'sort': sort if sort in self.sort_columns else None,
+				'order': 'desc' if descending else 'asc',
+				'offset': offset,
+				'total': len(matches),
+				'results': results
+			}}
+		except Exception as e:
+			sys.excepthook(*sys.exc_info())
+			return {'search': {'seq': message.get('seq'), 'error': str(e)}}
+
+	def client_play(self, message):
+		try:
+			entry = self.db.entry_lookup_by_id(int(message['id']))
+			if entry is None:
+				return {'result': 'not found'}
+			# play from the library so next/previous continue through it
+			self.shell_player.play_entry(entry, self.object.props.library_source)
+			return {'result': 'ok'}
+		except Exception as e:
+			return {'result': str(e)}
+
 	def playing_song_changed_cb(self, player, entry):
+		previous = self.current_entry
+		if self.repeat_one and previous is not None and entry != previous:
+			# replay only if the previous song played to its end; pressing
+			# next/previous or picking another song moves on as usual
+			duration = previous.get_ulong(RB.RhythmDBPropType.DURATION)
+			if duration > 0 and self.elapsed >= (duration - 3) * 1000000000:
+				GLib.idle_add(self.replay_entry, previous)
+
+		self.current_entry = entry
 		self.elapsed = 0
 		self.dispatch(self.entry_details(entry))
 
@@ -571,11 +750,16 @@ class WebRemotePlugin(GObject.Object, Peas.Activatable):
 		self.art_store = RB.ExtDB(name="album-art")
 		self.art_store.connect("added", self.art_added_cb)
 
+		self.db.connect("entry-added", self.invalidate_library_cache)
+		self.db.connect("entry-deleted", self.invalidate_library_cache)
+		self.db.connect("entry-changed", self.invalidate_library_cache)
+
 		self.shell_player = shell.props.shell_player
 		self.shell_player.connect("playing-song-changed", self.playing_song_changed_cb)
 		self.shell_player.connect("playing-song-property-changed", self.playing_song_property_changed_cb)
 		self.shell_player.connect("playing-changed", self.playing_changed_cb)
 		self.shell_player.connect("elapsed-nano-changed", self.elapsed_nano_changed_cb)
+		self.shell_player.connect("notify::play-order", self.play_order_changed_cb)
 		self.playing_song_changed_cb(self.shell_player, self.shell_player.get_playing_entry())
 
 		self.http_server = Soup.Server()
