@@ -4,17 +4,16 @@ Web-based remote control plugin for Rhythmbox.
 
 ## Screenshot
 
-<img src="./screenshot.png" style="max-width: 400px;">
+![Screenshot](./screenshot.png)
 
 ## Features
 
-- All the features from original plugin
-- Search your library by title, artist, album or genre, and tap a song to play it
-- Browse every song in the library (loads more as you scroll)
-- Material You design with the Nord color palette, in light or dark to match your system
-- Responsive layout for phones, tablets and desktops
-- New volume control
-- Keyboard shortcuts on desktop: `/` to search, `Space` to play/pause
+- All the features from original plugin.
+- Search your library by title, artist, or album.
+- Browse every song in the library.
+- Material You design with the Nord color palette.
+- Responsive layout for desktop and mobile.
+- New volume toggle control.
 
 ## Installation
 
